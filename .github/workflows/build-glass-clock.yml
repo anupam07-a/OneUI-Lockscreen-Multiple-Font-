@@ -1,0 +1,91 @@
+name: Build 5-21 Glass Lockscreen Font APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python & FontTools
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Download & Modify Barlow Condensed Light (Round Colon + 1.14x Tall Scale)
+        run: |
+          pip install fonttools requests
+          python3 - << 'EOF'
+          import urllib.request
+          from fontTools.ttLib import TTFont
+          from fontTools.pens.ttGlyphPen import TTGlyphPen
+          from fontTools.pens.transformPen import TransformPen
+
+          # 1. Download Barlow Condensed Light directly from Google Fonts GitHub
+          url = "https://raw.githubusercontent.com/google/fonts/main/ofl/barlowcondensed/BarlowCondensed-Light.ttf"
+          urllib.request.urlretrieve(url, "custom_clock.ttf")
+
+          font = TTFont("custom_clock.ttf")
+          glyf = font["glyf"]
+          hmtx = font["hmtx"]
+          cmap = font.getBestCmap()
+
+          # 2. Stretch digits '0'-'9' vertically by 1.14x to match 5:21 / 1:25 height
+          for code in range(ord('0'), ord('9') + 1):
+              gname = cmap.get(code)
+              if gname and gname in glyf:
+                  glyph = glyf[gname]
+                  if not glyph.isComposite():
+                      pen = TTGlyphPen(glyf)
+                      tpen = TransformPen(pen, (1.0, 0.0, 0.0, 1.14, 0, 0))
+                      glyph.draw(tpen, glyf)
+                      glyf[gname] = pen.glyph()
+
+          # 3. Replace existing font files in the repo with our modified font
+          import os, glob, shutil
+          for root, dirs, files in os.walk("."):
+              for f in files:
+                  if f.endswith(".ttf") and f != "custom_clock.ttf":
+                      target = os.path.join(root, f)
+                      print("Replacing:", target)
+                      shutil.copyfile("custom_clock.ttf", target)
+
+          font.save("custom_clock.ttf")
+          EOF
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Build or Repackage APK
+        run: |
+          if [ -f "gradlew" ]; then
+            chmod +x gradlew
+            ./gradlew assembleDebug || ./gradlew assembleRelease
+          else
+            sudo apt-get update && sudo apt-get install -y apktool zipalign apksigner
+            for apk in $(find . -name "*.apk"); do
+              apktool d -f "$apk" -o decompiled_apk
+              find decompiled_apk -name "*.ttf" -exec cp custom_clock.ttf {} \;
+              apktool b decompiled_apk -o unsigned.apk
+              zipalign -v -p 4 unsigned.apk aligned.apk
+              keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+              apksigner sign --ks debug.keystore --ks-pass pass:android --key-pass pass:android --out GlassClock-Lockscreen.apk aligned.apk
+              break
+            done
+          fi
+
+      - name: Upload Ready-to-Install APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: GlassClock-OneUI-Font-APK
+          path: |
+            **/*.apk
